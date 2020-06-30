@@ -1,6 +1,7 @@
 import time, datetime
 from posixpath import join as urljoin
 import requests
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from secrets import token
@@ -54,17 +55,31 @@ def parse_to_df(messages, self_likes=True):
     df.sort_values('timestamp', ascending=False, inplace=True)
     df['total_likes'] = df['favorited_by'].str.len()
     columns = ['id', 'name', 'sender_id', 'text', 'user_id', 'timestamp', 'total_likes']
-    df = df[columns]
+    df = df[df.columns]
     return df
 
 
-def save_userlikes(df, path):
+def parse_like_pairs(df):
     id_map = df.drop_duplicates('sender_id')[['sender_id', 'name']].set_index('sender_id')
-    user_likes = df.groupby('sender_id')['total_likes'].sum()
-    user_likes = pd.concat([user_likes, id_map], axis=1).set_index('name')
-    user_likes.query('total_likes > 0').plot(kind='bar', y='total_likes', legend=False, title='Total Likes')
-    plt.tight_layout()
-    plt.savefig(path)
+    likes = {}
+    for i, row in df.iterrows():
+        sender = row['sender_id']
+        likers = row['favorited_by']
+        if not likers:
+            continue
+        for liker in likers:
+            key = (sender, liker)
+            if key not in likes:
+                likes[key] = 1
+            else:
+                likes[key] += 1
+    like_pairs = pd.Series(likes, name='likes')
+    like_pairs.sort_values(ascending=False, inplace=True)
+    like_pairs.index.names = ['sender', 'liker']
+    mapper = id_map['name'].to_dict()
+    like_pairs_mapping = lambda x: (mapper.get(x[0], np.nan), mapper.get(x[1], np.nan))
+    like_pairs.index = like_pairs.index.map(like_pairs_mapping)
+    return like_pairs
 
 
 def upload_to_image_service(path):
@@ -88,16 +103,53 @@ def post_message(text, picture_url=None):
         }
     return requests.post(url=url, params=params, headers=headers)
 
-
-def update_total_likes(df):
-    path = './pics/chart.png'
-    save_userlikes(df, path)
+def update_aggregate(df, path, agg_func, msg):
+    agg_func(df)
     picture_url = upload_to_image_service(path)
-    last_message_time = df['timestamp'].min().strftime('%Y-%m-%d %H:%M:%S')
-    text = f'All Karma gained since: \n{last_message_time}'
-    return post_message(text, picture_url)
+    return post_message(msg, picture_url)
 
+class TotalLikes:
+    path = './pics/total_likes.png'
+
+    def agg_func(self, df):
+        agg_col_name = 'total_likes'
+        id_map = df.drop_duplicates('sender_id')[['sender_id', 'name']].set_index('sender_id')
+        agg = df.groupby('sender_id')['total_likes'].sum()
+        agg = pd.concat([agg, id_map], axis=1).set_index('name')
+        agg.sort_values(agg_col_name, ascending=False).iloc[:5, :].plot(kind='bar', y=agg_col_name, legend=False, title='Total Likes')
+        plt.tight_layout()
+        plt.savefig(self.path)
+
+    def update(self, df):
+        last_message_time = df['timestamp'].min().strftime('%Y-%m-%d %H:%M:%S')
+        msg = f'All Karma gained since: \n{last_message_time}'
+        return update_aggregate(df, self.path, self.agg_func, msg)
+
+class TotalMessages:
+    path = './pics/total_messages.png'
+
+    def agg_func(self, df):
+        agg_col_name = 'total_messages'
+        id_map = df.drop_duplicates('sender_id')[['sender_id', 'name']].set_index('sender_id')
+        agg = df.groupby('sender_id').size()
+        agg.name = agg_col_name
+        agg = pd.concat([agg, id_map], axis=1).set_index('name')
+        agg.sort_values(agg_col_name, ascending=False).iloc[:5, :].plot(kind='bar', y=agg_col_name, legend=False, title='Total Messages')
+        plt.tight_layout()
+        plt.savefig(self.path)
+
+    def update(self, df):
+        last_message_time = df['timestamp'].min().strftime('%Y-%m-%d %H:%M:%S')
+        msg = f'All Messages sent since: \n{last_message_time}'
+        return update_aggregate(df, self.path, self.agg_func, msg)
 
 messages = get_messages()
 df = parse_to_df(messages, self_likes=True)
-response = update_total_likes(df)
+like_pairs = parse_like_pairs(df)
+
+#print(df.head().to_string())
+#for obj in [TotalLikes(), TotalMessages()]:
+#    response = obj.update(df)
+
+
+#list(zip(*arrays))
